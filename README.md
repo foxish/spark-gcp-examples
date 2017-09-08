@@ -15,3 +15,10 @@ Accessing GCS or BigQuery from a Spark application using the GCS/BigQuery connec
 --conf spark.kubernetes.executor.secrets.<service account secret name>=<mount path of service account secret>
 ```   
 
+Creating a secret from a local service account Json key file can be done using the `kubectl` command as the following example shows:
+
+```
+kubectl create secret generic <secret name> --from-file=<path to service account Json key file>
+```
+
+
