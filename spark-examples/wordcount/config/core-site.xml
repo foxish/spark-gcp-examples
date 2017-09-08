@@ -16,14 +16,6 @@ a<?xml version="1.0" ?>
       The directory relative gs: uris resolve in inside of the default bucket.
     </description>
   </property>
-  <property>
-    <name>fs.gs.system.bucket</name>
-    <value></value>
-    <description>
-      Deprecated. GCS bucket to use as a default bucket if fs.default.name
-      is not a gs: uri.
-    </description>
-  </property>
 
   <!-- Authorization -->
   <property>
