@@ -21,3 +21,4 @@
 .scala_dependencies
 .settings
 **/.vscode/
+**/target/
