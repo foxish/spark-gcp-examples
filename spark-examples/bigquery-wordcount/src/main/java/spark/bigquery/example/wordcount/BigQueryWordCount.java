@@ -12,6 +12,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -49,7 +51,13 @@ public class BigQueryWordCount {
             conf = configure(javaSparkContext.hadoopConfiguration(), args);
             tmpDirPath = new Path(conf.get(BigQueryConfiguration.TEMP_GCS_PATH_KEY));
             deleteTmpDir(tmpDirPath, conf);
-            compute(javaSparkContext, conf);
+            Path gcsOutputPath =
+                    new Path(String.format("gs://%s/hadoop/output/wordcounts", conf.get(FS_GS_SYSTEM_BUCKET)));
+            FileSystem gcsFs = gcsOutputPath.getFileSystem(conf);
+            if (gcsFs.exists(gcsOutputPath) && !gcsFs.delete(gcsOutputPath, true)) {
+                System.err.println("Failed to delete the output directory: " + gcsOutputPath);
+            }
+            compute(javaSparkContext, conf, gcsOutputPath);
         } finally {
             if (conf != null && tmpDirPath != null) {
                 deleteTmpDir(tmpDirPath, conf);
@@ -74,7 +82,7 @@ public class BigQueryWordCount {
         conf.set(FS_GS_WORKING_DIR, "/");
 
         // Use service account for authentication. The service account key file is located at the path
-        // specified by the configuration property google.cloud.auth.service.account.json.keyfile..
+        // specified by the configuration property google.cloud.auth.service.account.json.keyfile.
         conf.set(EntriesCredentialConfiguration.BASE_KEY_PREFIX +
                         EntriesCredentialConfiguration.ENABLE_SERVICE_ACCOUNTS_SUFFIX,
                 "true");
@@ -92,19 +100,26 @@ public class BigQueryWordCount {
         return conf;
     }
 
-    private static void compute(JavaSparkContext javaSparkContext, Configuration conf) {
+    private static void compute(JavaSparkContext javaSparkContext, Configuration conf, Path gcsOutputPath) {
         JavaPairRDD<LongWritable, JsonObject> tableData = javaSparkContext.newAPIHadoopRDD(
                 conf,
                 GsonBigQueryInputFormat.class,
                 LongWritable.class,
                 JsonObject.class).cache();
-        JavaPairRDD<String, Long> wordCount = tableData
+        JavaPairRDD<String, Long> wordCounts = tableData
                 .map(entry -> toTuple(entry._2))
                 .keyBy(tuple -> tuple._1)
                 .mapValues(tuple -> tuple._2)
                 .reduceByKey((count1, count2) -> count1 + count2);
-        wordCount.take(10).forEach(t -> System.out.println(String.format("%s => %d", t._1, t._2)));
-        wordCount
+
+        // First write to GCS.
+        wordCounts.
+                mapToPair(tuple -> new Tuple2<>(new Text(tuple._1), new LongWritable(tuple._2))).
+                saveAsNewAPIHadoopFile(
+                        gcsOutputPath.toString(), Text.class, LongWritable.class, TextOutputFormat.class);
+
+        // Then write to a BigQuery table.
+        wordCounts
                 .map(tuple -> Tuple2.apply(null, toJson(tuple)))
                 .keyBy(tuple -> tuple._1)
                 .mapValues(tuple -> tuple._2)
