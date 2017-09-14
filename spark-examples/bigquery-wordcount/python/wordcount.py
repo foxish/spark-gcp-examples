@@ -3,6 +3,7 @@
 import json
 import pprint
 import subprocess
+import sys
 import pyspark
 
 sc = pyspark.SparkContext()
@@ -10,12 +11,14 @@ sc = pyspark.SparkContext()
 # Use the Google Cloud Storage bucket for temporary BigQuery export data used
 # by the InputFormat. This assumes the Google Cloud Storage connector for
 # Hadoop is configured.
-bucket = sc._jsc.hadoopConfiguration().get('fs.gs.system.bucket')
-project = sc._jsc.hadoopConfiguration().get('fs.gs.project.id')
+project = sys.argv[1]
+bucket = sys.argv[2]
 input_directory = 'gs://{}/hadoop/tmp/bigquery/pyspark_input'.format(bucket)
 
 conf = {
     # Input Parameters
+    'fs.gs.project.id': project,
+    'fs.gs.system.bucket': bucket,
     'mapred.bq.project.id': project,
     'mapred.bq.gcs.bucket': bucket,
     'mapred.bq.temp.gcs.path': input_directory,
