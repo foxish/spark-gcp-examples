@@ -33,7 +33,7 @@ public class BigQueryWordCount {
     private static final String OUTPUT_DATASET_ID = "wordcount_dataset";
     private static final String OUTPUT_TABLE_ID = "wordcount_output";
     private static final String WORD_COLUMN = "word";
-    private static final String WORD_COUNT_COLUMN = "word";
+    private static final String WORD_COUNT_COLUMN = "word_count";
     private static final String OUTPUT_TABLE_SCHEMA =
             "[{'name': 'word', 'type': 'STRING'}, {'name': 'word_count', 'type': 'INTEGER'}]";
 
@@ -58,12 +58,15 @@ public class BigQueryWordCount {
     }
 
     private static Configuration configure(Configuration conf, String[] args) throws IOException {
+        String inputTableId = args[0];
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(inputTableId),
+                "Input BigQuery table (fully-qualified) ID must not be null or empty");
         String projectId = conf.get(FS_GS_PROJECT_ID);
-        Preconditions.checkArgument(
-                !Strings.isNullOrEmpty(projectId), "GCP project ID must not be null or empty");
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(projectId),
+                "GCP project ID must not be null or empty");
         String systemBucket = conf.get(FS_GS_SYSTEM_BUCKET);
-        Preconditions.checkArgument(
-                !Strings.isNullOrEmpty(systemBucket), "GCS system bucket must not be null or empty");
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(systemBucket),
+                "GCS system bucket must not be null or empty");
 
         // Basic BigQuery connector configuration.
         conf.set(BigQueryConfiguration.PROJECT_ID_KEY, projectId);
@@ -100,6 +103,7 @@ public class BigQueryWordCount {
                 .keyBy(tuple -> tuple._1)
                 .mapValues(tuple -> tuple._2)
                 .reduceByKey((count1, count2) -> count1 + count2);
+        wordCount.take(10).forEach(t -> System.out.println(String.format("%s => %d", t._1, t._2)));
         wordCount
                 .map(tuple -> Tuple2.apply(null, toJson(tuple)))
                 .keyBy(tuple -> tuple._1)
