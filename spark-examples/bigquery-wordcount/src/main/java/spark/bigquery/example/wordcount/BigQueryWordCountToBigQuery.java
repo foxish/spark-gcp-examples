@@ -1,17 +1,23 @@
 package spark.bigquery.example.wordcount;
 
+import com.google.api.services.bigquery.model.TableFieldSchema;
+import com.google.api.services.bigquery.model.TableSchema;
 import com.google.cloud.hadoop.io.bigquery.BigQueryConfiguration;
-import com.google.cloud.hadoop.io.bigquery.BigQueryOutputFormat;
+import com.google.cloud.hadoop.io.bigquery.BigQueryFileFormat;
 import com.google.cloud.hadoop.io.bigquery.GsonBigQueryInputFormat;
+import com.google.cloud.hadoop.io.bigquery.output.BigQueryOutputConfiguration;
+import com.google.cloud.hadoop.io.bigquery.output.IndirectBigQueryOutputFormat;
 import com.google.cloud.hadoop.util.EntriesCredentialConfiguration;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import com.google.gson.JsonObject;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.spark.SparkContext;
@@ -24,24 +30,27 @@ import java.io.IOException;
 
 /**
  * A simple work count example that both reads its input from and writes its output to BigQuery.
+ * GCS is used as temporary storage for both data exported from the input BigQuery table and
+ * output data to be loaded into the output BigQuery table.
  */
-public class BigQueryWordCount {
+public class BigQueryWordCountToBigQuery {
 
     private static final String FS_GS_PROJECT_ID = "fs.gs.project.id";
     private static final String FS_GS_SYSTEM_BUCKET = "fs.gs.system.bucket";
     private static final String FS_GS_WORKING_DIR = "fs.gs.working.dir";
     private static final String MAPRED_OUTPUT_FORMAT_CLASS = "mapreduce.job.outputformat.class";
 
-    private static final String OUTPUT_DATASET_ID = "wordcount_dataset";
-    private static final String OUTPUT_TABLE_ID = "wordcount_output";
     private static final String WORD_COLUMN = "word";
     private static final String WORD_COUNT_COLUMN = "word_count";
-    private static final String OUTPUT_TABLE_SCHEMA =
-            "[{'name': 'word', 'type': 'STRING'}, {'name': 'word_count', 'type': 'INTEGER'}]";
+    private static final TableSchema OUTPUT_TABLE_SCHEMA = new TableSchema().setFields(
+            ImmutableList.of(
+                    new TableFieldSchema().setName(WORD_COLUMN).setType("STRING"),
+                    new TableFieldSchema().setName(WORD_COUNT_COLUMN).setType("INTEGER")
+            ));
 
     public static void main(String[] args) throws IOException {
-        if (args.length != 1) {
-            System.err.println("Usage: BigQueryWordCount <input table id>");
+        if (args.length != 2) {
+            System.err.println("Usage: BigQueryWordCount <input table id> <output table id>");
             System.exit(1);
         }
 
@@ -51,13 +60,7 @@ public class BigQueryWordCount {
             conf = configure(javaSparkContext.hadoopConfiguration(), args);
             tmpDirPath = new Path(conf.get(BigQueryConfiguration.TEMP_GCS_PATH_KEY));
             deleteTmpDir(tmpDirPath, conf);
-            Path gcsOutputPath =
-                    new Path(String.format("gs://%s/hadoop/output/wordcounts", conf.get(FS_GS_SYSTEM_BUCKET)));
-            FileSystem gcsFs = gcsOutputPath.getFileSystem(conf);
-            if (gcsFs.exists(gcsOutputPath) && !gcsFs.delete(gcsOutputPath, true)) {
-                System.err.println("Failed to delete the output directory: " + gcsOutputPath);
-            }
-            compute(javaSparkContext, conf, gcsOutputPath);
+            compute(javaSparkContext, conf);
         } finally {
             if (conf != null && tmpDirPath != null) {
                 deleteTmpDir(tmpDirPath, conf);
@@ -69,6 +72,9 @@ public class BigQueryWordCount {
         String inputTableId = args[0];
         Preconditions.checkArgument(!Strings.isNullOrEmpty(inputTableId),
                 "Input BigQuery table (fully-qualified) ID must not be null or empty");
+        String outputTableId = args[1];
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(inputTableId),
+                "Output BigQuery table (fully-qualified) ID must not be null or empty");
         String projectId = conf.get(FS_GS_PROJECT_ID);
         Preconditions.checkArgument(!Strings.isNullOrEmpty(projectId),
                 "GCP project ID must not be null or empty");
@@ -89,18 +95,24 @@ public class BigQueryWordCount {
 
         // Input configuration.
         BigQueryConfiguration.configureBigQueryInput(conf, inputTableId);
-        String inputTmpDir = String.format("gs://%s/hadoop/tmp/bigquery/wordcount", systemBucket);
-        conf.set(BigQueryConfiguration.TEMP_GCS_PATH_KEY, inputTmpDir);
+        String inputTmpGcsPath = String.format("gs://%s/hadoop/tmp/bigquery/wordcount/input", systemBucket);
+        conf.set(BigQueryConfiguration.TEMP_GCS_PATH_KEY, inputTmpGcsPath);
 
         // Output configuration.
-        BigQueryConfiguration.configureBigQueryOutput(
-                conf, projectId, OUTPUT_DATASET_ID, OUTPUT_TABLE_ID, OUTPUT_TABLE_SCHEMA);
-        conf.set(MAPRED_OUTPUT_FORMAT_CLASS, BigQueryOutputFormat.class.getName());
+        String outputTmpGcsPath = String.format("gs://%s/hadoop/tmp/bigquery/wordcount/output", systemBucket);
+        BigQueryOutputConfiguration.configure(
+                conf,
+                outputTableId,
+                OUTPUT_TABLE_SCHEMA,
+                outputTmpGcsPath,
+                BigQueryFileFormat.NEWLINE_DELIMITED_JSON,
+                TextOutputFormat.class);
+        conf.set(MAPRED_OUTPUT_FORMAT_CLASS, IndirectBigQueryOutputFormat.class.getName());
 
         return conf;
     }
 
-    private static void compute(JavaSparkContext javaSparkContext, Configuration conf, Path gcsOutputPath) {
+    private static void compute(JavaSparkContext javaSparkContext, Configuration conf) {
         JavaPairRDD<LongWritable, JsonObject> tableData = javaSparkContext.newAPIHadoopRDD(
                 conf,
                 GsonBigQueryInputFormat.class,
@@ -110,19 +122,11 @@ public class BigQueryWordCount {
                 .map(entry -> toTuple(entry._2))
                 .keyBy(tuple -> tuple._1)
                 .mapValues(tuple -> tuple._2)
-                .reduceByKey((count1, count2) -> count1 + count2)
-                .cache();
-
-        // First write to GCS.
-        wordCounts.
-                mapToPair(tuple -> new Tuple2<>(new Text(tuple._1), new LongWritable(tuple._2))).
-                saveAsNewAPIHadoopFile(
-                        gcsOutputPath.toString(), Text.class, LongWritable.class, TextOutputFormat.class);
-
-        // Then write to a BigQuery table.
+                .reduceByKey((count1, count2) -> count1 + count2);
         wordCounts
-                .keyBy(tuple -> tuple._1)
-                .mapValues(BigQueryWordCount::toJson)
+                .map(tuple -> new Text(toJson(tuple).toString()))
+                .keyBy(jsonText -> jsonText)
+                .mapValues(jsonText -> NullWritable.get()) // Values do not matter.
                 .saveAsNewAPIHadoopDataset(conf);
     }
 

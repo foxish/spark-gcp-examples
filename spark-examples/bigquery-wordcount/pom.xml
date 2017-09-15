@@ -70,6 +70,7 @@
                 <artifactId>maven-assembly-plugin</artifactId>
                 <executions>
                     <execution>
+                        <id>bigquery-wordcount</id>
                         <phase>package</phase>
                         <goals>
                             <goal>single</goal>
@@ -79,6 +80,25 @@
                                 <manifest>
                                     <mainClass>
                                         spark.bigquery.example.wordcount.BigQueryWordCount
+                                    </mainClass>
+                                </manifest>
+                            </archive>
+                            <descriptorRefs>
+                                <descriptorRef>jar-with-dependencies</descriptorRef>
+                            </descriptorRefs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>bigquery-wordcount-to-bigquery</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                        <configuration>
+                            <archive>
+                                <manifest>
+                                    <mainClass>
+                                        spark.bigquery.example.wordcount.BigQueryWordCountToBigQuery
                                     </mainClass>
                                 </manifest>
                             </archive>
