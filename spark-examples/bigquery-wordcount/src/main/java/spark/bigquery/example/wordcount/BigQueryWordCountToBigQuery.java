@@ -29,7 +29,8 @@ import scala.Tuple2;
 import java.io.IOException;
 
 /**
- * A simple work count example that both reads its input from and writes its output to BigQuery.
+ * A simple work count example that reads its input data from a BigQuery table, e.g.,
+ * publicdata:samples.shakespeare and writes its output to a user-specified BigQuery table.
  * GCS is used as temporary storage for both data exported from the input BigQuery table and
  * output data to be loaded into the output BigQuery table.
  */
@@ -50,7 +51,8 @@ public class BigQueryWordCountToBigQuery {
 
     public static void main(String[] args) throws IOException {
         if (args.length != 2) {
-            System.err.println("Usage: BigQueryWordCount <input table id> <output table id>");
+            System.err.println("Usage: BigQueryWordCountToBigQuery <fully-qualified input table id> " +
+                    "<fully-qualified output table id>");
             System.exit(1);
         }
 
@@ -95,11 +97,11 @@ public class BigQueryWordCountToBigQuery {
 
         // Input configuration.
         BigQueryConfiguration.configureBigQueryInput(conf, inputTableId);
-        String inputTmpGcsPath = String.format("gs://%s/hadoop/tmp/bigquery/wordcount/input", systemBucket);
+        String inputTmpGcsPath = String.format("gs://%s/spark/tmp/bigquery/wordcount/input", systemBucket);
         conf.set(BigQueryConfiguration.TEMP_GCS_PATH_KEY, inputTmpGcsPath);
 
         // Output configuration.
-        String outputTmpGcsPath = String.format("gs://%s/hadoop/tmp/bigquery/wordcount/output", systemBucket);
+        String outputTmpGcsPath = String.format("gs://%s/spark/tmp/bigquery/wordcount/output", systemBucket);
         BigQueryOutputConfiguration.configure(
                 conf,
                 outputTableId,

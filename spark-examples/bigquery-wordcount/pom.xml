@@ -70,7 +70,7 @@
                 <artifactId>maven-assembly-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>bigquery-wordcount</id>
+                        <id>bigquery-wordcount-to-gcs</id>
                         <phase>package</phase>
                         <goals>
                             <goal>single</goal>
@@ -79,7 +79,7 @@
                             <archive>
                                 <manifest>
                                     <mainClass>
-                                        spark.bigquery.example.wordcount.BigQueryWordCount
+                                        spark.bigquery.example.wordcount.BigQueryWordCountToGCS
                                     </mainClass>
                                 </manifest>
                             </archive>
