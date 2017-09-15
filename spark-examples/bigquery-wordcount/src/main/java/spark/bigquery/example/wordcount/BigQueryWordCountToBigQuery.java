@@ -60,7 +60,7 @@ public class BigQueryWordCountToBigQuery {
         Path tmpDirPath = null;
         try (JavaSparkContext javaSparkContext = JavaSparkContext.fromSparkContext(SparkContext.getOrCreate())) {
             conf = configure(javaSparkContext.hadoopConfiguration(), args);
-            tmpDirPath = new Path(conf.get(BigQueryConfiguration.TEMP_GCS_PATH_KEY));
+            tmpDirPath = new Path(conf.get(BigQueryConfiguration.TEMP_GCS_PATH_KEY)).getParent();
             deleteTmpDir(tmpDirPath, conf);
             compute(javaSparkContext, conf);
         } finally {
