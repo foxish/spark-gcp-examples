@@ -4,14 +4,14 @@ import com.google.cloud.hadoop.util.EntriesCredentialConfiguration;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 
+import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
-import org.apache.spark.SparkContext;
-import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.SparkConf;
 import org.apache.spark.storage.StorageLevel;
-import org.apache.spark.streaming.Milliseconds;
+import org.apache.spark.streaming.Seconds;
 import org.apache.spark.streaming.api.java.JavaPairDStream;
 import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
@@ -25,19 +25,17 @@ import scala.Tuple2;
  * A simple Spark Streaming example that gets words from a Cloud PubSub topic, computes the word
  * counts, and writes the result of each batch to a file on GCS.
  *
- * <p>
- *   This example uses the GCS connector's Hadoop configuration property
- *   {@code google.cloud.auth.service.account.json.keyfile} for specifying the GCP service account
- *   key file path, even though {@link SparkGCPCredentials} also works with Application Default
- *   Credentials that uses the environment variable GOOGLE_APPLICATION_CREDENTIALS.
- * </p>
+ * <p> This example uses the GCS connector's Hadoop configuration property {@code
+ * google.cloud.auth.service.account.json.keyfile} for specifying the GCP service account key file
+ * path, even though {@link SparkGCPCredentials} also works with Application Default Credentials
+ * that uses the environment variable GOOGLE_APPLICATION_CREDENTIALS. </p>
  */
 public class CloudPubSubStreamingWordCount {
 
   public static void main(String[] args) throws InterruptedException {
-    if (args.length != 3) {
+    if (args.length != 4) {
       System.err.println("Usage: CloudPubSubStreamingWordCount <GCP project ID> " +
-          "<Cloud PubSub topic name> <GCS output path>");
+          "<Cloud PubSub subscription> <GCS output dir path> <job duration in seconds>");
       System.exit(1);
     }
 
@@ -47,8 +45,8 @@ public class CloudPubSubStreamingWordCount {
         !Strings.isNullOrEmpty(args[1]), "Cloud PubSub topic name must not be empty");
 
     JavaStreamingContext jsc = new JavaStreamingContext(
-        JavaSparkContext.fromSparkContext(SparkContext.getOrCreate()),
-        Milliseconds.apply(2000) // Batch duration
+        new SparkConf().setAppName("Cloud PubSub Spark Streaming Word Count"),
+        Seconds.apply(30) // Batch duration
     );
 
     Configuration hadoopConf = jsc.sparkContext().hadoopConfiguration();
@@ -69,29 +67,29 @@ public class CloudPubSubStreamingWordCount {
     JavaReceiverInputDStream<SparkPubsubMessage> pubSubStream = PubsubUtils.createStream(
         jsc,
         args[0], // GCP project ID
-        args[1], // Cloud PubSub topic name
-        "", // Cloud PubSub subscription (empty so one gets created)
+        args[1], // Cloud PubSub subscription
         new SparkGCPCredentials.Builder()
             .jsonServiceAccount(serviceAccountJsonKeyFilePath)
             .build(),
-        StorageLevel.MEMORY_AND_DISK_SER_2());
+        StorageLevel.MEMORY_AND_DISK_SER());
 
     JavaPairDStream<String, Long> wordCounts = pubSubStream
-        .mapToPair(word -> new Tuple2<>(new String(word.getData()), 1L))
+        .mapToPair(message -> new Tuple2<>(new String(message.getData()), 1L))
         .reduceByKey((count1, count2) -> count1 + count2);
+
+    final String gcsFilePathTemplate = args[2] + "/batch-%d";
     wordCounts
         .mapToPair(tuple -> new Tuple2<>(new Text(tuple._1), new LongWritable(tuple._2)))
-        .saveAsNewAPIHadoopFiles(
-            String.format("%s/word-count", args[2] /* GCS output path */),
-            "txt",
-            Text.class,
-            LongWritable.class,
-            TextOutputFormat.class,
-            hadoopConf);
+        .foreachRDD(rdd -> rdd
+            .saveAsNewAPIHadoopFile(String.format(gcsFilePathTemplate, rdd.id()),
+                Text.class,
+                LongWritable.class,
+                TextOutputFormat.class));
 
     try {
       jsc.start();
-      jsc.awaitTermination();
+      // Let the job run for the given duration and then terminate it.
+      jsc.awaitTerminationOrTimeout(TimeUnit.SECONDS.toMillis(Long.parseLong(args[3])));
     } finally {
       jsc.stop(true, true);
     }
