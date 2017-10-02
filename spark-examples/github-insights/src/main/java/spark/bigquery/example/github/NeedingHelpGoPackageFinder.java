@@ -17,7 +17,12 @@ import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SQLContext;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.storage.StorageLevel;
 
 import scala.Tuple2;
@@ -52,6 +57,54 @@ public class NeedingHelpGoPackageFinder {
   private static final Pattern GO_BLOCK_IMPORT_PATTERN = Pattern
       .compile("(?s).*import\\s+\\(([^)]*)\\).*");
 
+  private static final String GO_PACKAGES_NEEDING_HELP_TABLE = "go_packages_needing_help";
+
+  private static final String GO_PACKAGE_IMPORTS_TABLE = "go_package_imports";
+
+  private static final StructType GO_PACKAGES_NEEDING_HELP_TABLE_SCHEMA = new StructType(
+      new StructField[]{
+          new StructField("repo_name", DataTypes.StringType, false, Metadata.empty()),
+          new StructField("package", DataTypes.StringType, false, Metadata.empty()),
+          new StructField("help_count", DataTypes.IntegerType, false, Metadata.empty()),
+      }
+  );
+
+  private static final StructType GO_PACKAGE_IMPORTS_TABLE_SCHEMA = new StructType(
+      new StructField[]{
+          new StructField("repo_name", DataTypes.StringType, true, Metadata.empty()),
+          new StructField("package", DataTypes.StringType, false, Metadata.empty()),
+          new StructField("import_count", DataTypes.IntegerType, false, Metadata.empty()),
+      }
+  );
+
+  private final String projectId;
+  private final String bigQueryDataset;
+
+  private final SQLContext sqlContext;
+  private final BigQuerySQLContext bigQuerySQLContext;
+
+  private NeedingHelpGoPackageFinder(String projectId, String bigQueryDataset, String gcsBucket) {
+    Preconditions.checkArgument(!Strings.isNullOrEmpty(projectId),
+        "GCP project ID must not be empty");
+    Preconditions.checkArgument(!Strings.isNullOrEmpty(bigQueryDataset),
+        "BigQuery dataset name must not be empty");
+    Preconditions.checkArgument(!Strings.isNullOrEmpty(gcsBucket),
+        "GCS bucket must not be empty");
+
+    this.projectId = projectId;
+    this.bigQueryDataset = bigQueryDataset;
+
+    String serviceAccountJsonKeyFilePath = System.getenv(APPLICATION_CREDENTIALS_ENV);
+    Preconditions.checkArgument(!Strings.isNullOrEmpty(serviceAccountJsonKeyFilePath),
+        APPLICATION_CREDENTIALS_ENV + " must be set");
+
+    this.sqlContext = SQLContext.getOrCreate(SparkContext.getOrCreate());
+    this.bigQuerySQLContext = new BigQuerySQLContext(this.sqlContext);
+    this.bigQuerySQLContext.setBigQueryProjectId(projectId);
+    this.bigQuerySQLContext.setBigQueryGcsBucket(gcsBucket);
+    this.bigQuerySQLContext.setGcpJsonKeyFile(serviceAccountJsonKeyFilePath);
+  }
+
   public static void main(String[] args) {
     if (args.length != 3) {
       System.err.println("Usage: NeedingHelpGoPackageFinder <GCP project ID> "
@@ -60,70 +113,58 @@ public class NeedingHelpGoPackageFinder {
     }
 
     String projectId = args[0];
-    Preconditions.checkArgument(!Strings.isNullOrEmpty(projectId),
-        "GCP project ID must not be empty");
     String bigQueryDataset = args[1];
-    Preconditions.checkArgument(!Strings.isNullOrEmpty(bigQueryDataset),
-        "BigQuery dataset name must not be empty");
     String gcsBucket = args[2];
-    Preconditions.checkArgument(!Strings.isNullOrEmpty(gcsBucket),
-        "GCS bucket must not be empty");
+    NeedingHelpGoPackageFinder finder = new NeedingHelpGoPackageFinder(projectId, bigQueryDataset,
+        gcsBucket);
+    finder.run();
+  }
 
-    BigQuerySQLContext bigQuerySQLContext = createBigQuerySQLContext(projectId, gcsBucket);
-    String goFilesTableId = String.format("%s:%s.%s", projectId, bigQueryDataset, GO_FILES_TABLE);
-    queryAndOutputGoFilesTable(bigQuerySQLContext, goFilesTableId);
+  private void run() {
+    String goFilesTableId = String
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_FILES_TABLE);
+    selectAndOutputGoFilesTable(goFilesTableId);
     String goContentsTableId = String
-        .format("%s:%s.%s", projectId, bigQueryDataset, GO_CONTENTS_TABLE);
-    queryAndOutputGoContentsTable(bigQuerySQLContext, bigQueryDataset, goContentsTableId);
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_CONTENTS_TABLE);
+    selectAndOutputGoContentsTable(goContentsTableId);
 
-    Dataset<Row> goContentsDataset = loadGoContentsTable(bigQuerySQLContext, goContentsTableId);
-    JavaPairRDD<Tuple2<String, String>, Integer> packagesByRepoNames =
-        getNeedHelpPackages(goContentsDataset);
-    packagesByRepoNames
-        .take(10)
-        .forEach(tuple -> System.out.println(tuple._1() + ": " + tuple._2()));
-
-    JavaPairRDD<Tuple2<String, String>, Integer> importedPackages = getImportedPackages(
-        goContentsDataset);
-    importedPackages
-        .take(10)
-        .forEach(tuple -> System.out.println(tuple._1() + ": " + tuple._2()));
+    Dataset<Row> goContentsDataset = loadGoContentsTable(goContentsTableId);
+    String goPackagesNeedingHelpTableId = String
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_PACKAGES_NEEDING_HELP_TABLE);
+    outputGoPackagesNeedingHelpTable(getNeedHelpPackages(goContentsDataset),
+        goPackagesNeedingHelpTableId);
+    String goPackageImportsTableId = String
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_PACKAGE_IMPORTS_TABLE);
+    outputGoPackageImportsTable(getImportedPackages(goContentsDataset), goPackageImportsTableId);
   }
 
-  private static BigQuerySQLContext createBigQuerySQLContext(String projectId, String gcsBucket) {
-    String serviceAccountJsonKeyFilePath = System.getenv(APPLICATION_CREDENTIALS_ENV);
-    Preconditions.checkArgument(!Strings.isNullOrEmpty(serviceAccountJsonKeyFilePath),
-        APPLICATION_CREDENTIALS_ENV + " must be set");
-
-    SQLContext sqlContext = SQLContext.getOrCreate(SparkContext.getOrCreate());
-    BigQuerySQLContext bigQuerySQLContext = new BigQuerySQLContext(sqlContext);
-    bigQuerySQLContext.setBigQueryProjectId(projectId);
-    bigQuerySQLContext.setBigQueryGcsBucket(gcsBucket);
-    bigQuerySQLContext.setGcpJsonKeyFile(serviceAccountJsonKeyFilePath);
-
-    return bigQuerySQLContext;
-  }
-
-  private static void queryAndOutputGoFilesTable(BigQuerySQLContext bigQuerySQLContext,
-      String goFilesTableId) {
-    Dataset<Row> dataset = bigQuerySQLContext.bigQuerySelect(GO_FILES_QUERY);
+  /**
+   * This function selects out Go files from github_repos.sample_files and output the result to the
+   * given BigQuery table.
+   */
+  private void selectAndOutputGoFilesTable(String outputTableId) {
+    Dataset<Row> dataset = this.bigQuerySQLContext.bigQuerySelect(GO_FILES_QUERY);
     BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
-    bigQueryDataFrame.saveAsBigQueryTable(goFilesTableId, CreateDisposition.CREATE_IF_NEEDED(),
+    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
         WriteDisposition.WRITE_EMPTY());
   }
 
-  private static void queryAndOutputGoContentsTable(BigQuerySQLContext bigQuerySQLContext,
-      String bigQueryDataset, String goContentsTableId) {
-    Dataset<Row> dataset = bigQuerySQLContext
-        .bigQuerySelect(String.format(GO_CONTENTS_QUERY_TEMPLATE, bigQueryDataset, GO_FILES_TABLE));
+  /**
+   * This function selects out Go source file contents from github_repos.sample_contents for files
+   * in the table written by {@link #selectAndOutputGoFilesTable(String)} and output the result to
+   * the given BigQuery table.
+   */
+  private void selectAndOutputGoContentsTable(String outputTableId) {
+    Dataset<Row> dataset = this.bigQuerySQLContext
+        .bigQuerySelect(
+            String.format(GO_CONTENTS_QUERY_TEMPLATE, this.bigQueryDataset, GO_FILES_TABLE));
     BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
-    bigQueryDataFrame.saveAsBigQueryTable(goContentsTableId, CreateDisposition.CREATE_IF_NEEDED(),
+    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
         WriteDisposition.WRITE_EMPTY());
   }
 
-  private static Dataset<Row> loadGoContentsTable(BigQuerySQLContext bigQuerySQLContext,
-      String goContentsTableId) {
-    return bigQuerySQLContext.bigQueryTable(goContentsTableId)
+  private Dataset<Row> loadGoContentsTable(String goContentsTableId) {
+    return this.bigQuerySQLContext.bigQueryTable(goContentsTableId)
         .persist(StorageLevel.MEMORY_AND_DISK());
   }
 
@@ -133,6 +174,37 @@ public class NeedingHelpGoPackageFinder {
         .toJavaRDD()
         .mapToPair(row -> new Tuple2<>(row.getString(0), row.getString(1)))
         .filter(tuple -> tuple._2() != null);
+  }
+
+  /**
+   * This function outputs the result of the number of places helps are needed for each
+   * repository/package combination to the given BigQuery table.
+   */
+  private void outputGoPackagesNeedingHelpTable(
+      JavaPairRDD<Tuple2<String, String>, Integer> packagesNeedingHelp, String outputTableId) {
+    Dataset<Row> dataset = this.sqlContext.createDataFrame(packagesNeedingHelp
+            .map(tuple -> RowFactory.create(tuple._1()._1(), tuple._1()._2(), tuple._2()))
+            .rdd(),
+        GO_PACKAGES_NEEDING_HELP_TABLE_SCHEMA);
+    BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
+    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
+        WriteDisposition.WRITE_EMPTY());
+  }
+
+  /**
+   * This function outputs the result of the number of times a package is imported in other
+   * repositories to the given BigQuery table.
+   */
+  private void outputGoPackageImportsTable(
+      JavaPairRDD<Tuple2<String, String>, Integer> packageImports, String outputTableId) {
+    Dataset<Row> dataset = this.sqlContext.createDataFrame(
+        packageImports
+            .map(tuple -> RowFactory.create(tuple._1()._1(), tuple._1()._2(), tuple._2()))
+            .rdd(),
+        GO_PACKAGE_IMPORTS_TABLE_SCHEMA);
+    BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
+    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
+        WriteDisposition.WRITE_EMPTY());
   }
 
   /**
@@ -167,6 +239,7 @@ public class NeedingHelpGoPackageFinder {
         .flatMap(
             importPaths -> Splitter.on('\n').omitEmptyStrings().trimResults().split(importPaths)
                 .iterator())
+        .filter(path -> !path.startsWith("//")) // Ignore comments.
         .mapToPair(path -> new Tuple2<>(getRepoNameAndPackage(path), 1))
         .reduceByKey((left, right) -> left + right)
         .mapToPair(Tuple2::swap)
@@ -177,7 +250,7 @@ public class NeedingHelpGoPackageFinder {
   private static String getImportedPackages(String importContent) {
     Matcher matcher = GO_BLOCK_IMPORT_PATTERN.matcher(importContent);
     if (matcher.matches()) {
-      return matcher.group(1);
+      return matcher.group(1).replaceAll("\"", ""); // Get rid of the double quotes.
     }
     matcher = GO_SINGLE_IMPORT_PATTERN.matcher(importContent);
     if (matcher.matches()) {
