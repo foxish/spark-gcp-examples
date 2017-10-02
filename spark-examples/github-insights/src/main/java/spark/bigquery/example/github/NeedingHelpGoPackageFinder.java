@@ -3,19 +3,23 @@ package spark.bigquery.example.github;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import com.spotify.spark.bigquery.BigQueryDataFrame;
 import com.spotify.spark.bigquery.BigQuerySQLContext;
 import com.spotify.spark.bigquery.CreateDisposition;
 import com.spotify.spark.bigquery.WriteDisposition;
+
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.storage.StorageLevel;
+
 import scala.Tuple2;
 
 /**
@@ -43,10 +47,10 @@ public class NeedingHelpGoPackageFinder {
   private static final String GO_PACKAGE_KEYWORD = "package";
 
   private static final Pattern GO_SINGLE_IMPORT_PATTERN = Pattern
-      .compile("(?s).*import\\s*\"(.*)\".*");
+      .compile(".*import\\s+\"(.*)\".*");
 
   private static final Pattern GO_BLOCK_IMPORT_PATTERN = Pattern
-      .compile("(?s).*import \\(([^)])\\).*");
+      .compile("(?s).*import\\s+\\(([^)]*)\\).*");
 
   public static void main(String[] args) {
     if (args.length != 3) {
@@ -74,12 +78,14 @@ public class NeedingHelpGoPackageFinder {
 
     Dataset<Row> goContentsDataset = loadGoContentsTable(bigQuerySQLContext, goContentsTableId);
     JavaPairRDD<Tuple2<String, String>, Integer> packagesByRepoNames =
-        getNeedHelpPackagesByRepoNames(goContentsDataset);
+        getNeedHelpPackages(goContentsDataset);
     packagesByRepoNames
         .take(10)
         .forEach(tuple -> System.out.println(tuple._1() + ": " + tuple._2()));
 
-    getImportedPackages(goContentsDataset)
+    JavaPairRDD<Tuple2<String, String>, Integer> importedPackages = getImportedPackages(
+        goContentsDataset);
+    importedPackages
         .take(10)
         .forEach(tuple -> System.out.println(tuple._1() + ": " + tuple._2()));
   }
@@ -123,23 +129,24 @@ public class NeedingHelpGoPackageFinder {
 
   private static JavaPairRDD<String, String> getContentsByRepoNames(
       Dataset<Row> goContentsDataset) {
-    return goContentsDataset.select("sample_repo_name", "content").toJavaRDD()
+    return goContentsDataset.select("sample_repo_name", "content")
+        .toJavaRDD()
         .mapToPair(row -> new Tuple2<>(row.getString(0), row.getString(1)))
         .filter(tuple -> tuple._2() != null);
   }
 
   /**
    * This function takes the sample contents dataset and produces a JavaPairRDD with keys in the
-   * form of (repo_name, package) and values being a count a particular repo_name/package
+   * form of (sample_repo_name, package) and values being a count a particular repo_name/package
    * combination needs help. The result is sorted in descending order by the counts.
    */
-  private static JavaPairRDD<Tuple2<String, String>, Integer> getNeedHelpPackagesByRepoNames(
+  private static JavaPairRDD<Tuple2<String, String>, Integer> getNeedHelpPackages(
       Dataset<Row> goContentsDataset) {
     return getContentsByRepoNames(goContentsDataset)
         .filter(tuple -> tuple._2().contains("TODO") || tuple._2().contains("FIXME"))
-        .flatMapValues(content -> Splitter.on('\n').split(content))
+        .flatMapValues(content -> Splitter.on('\n').omitEmptyStrings().trimResults().split(content))
         .filter(tuple -> tuple._2().startsWith(GO_PACKAGE_KEYWORD))
-        .mapValues(line -> line.substring(GO_PACKAGE_KEYWORD.length() + 1).trim())
+        .mapValues(line -> line.substring(GO_PACKAGE_KEYWORD.length() + 1))
         .mapToPair(tuple -> new Tuple2<>(new Tuple2<>(tuple._1(), tuple._2()), 1))
         .reduceByKey((left, right) -> left + right)
         .mapToPair(Tuple2::swap)
@@ -147,21 +154,51 @@ public class NeedingHelpGoPackageFinder {
         .mapToPair(Tuple2::swap);
   }
 
-  private static JavaPairRDD<String, String> getImportedPackages(Dataset<Row> goContentsDataset) {
+  /**
+   * This function takes the sample contents dataset and produces a JavaPairRDD with keys in the
+   * form of (sample_repo_name, package) and values being a count a particular repo_name/package
+   * combination is imported by other projects. The result is sorted in descending order by the
+   * counts.
+   */
+  private static JavaPairRDD<Tuple2<String, String>, Integer> getImportedPackages(
+      Dataset<Row> goContentsDataset) {
     return getContentsByRepoNames(goContentsDataset)
-        .flatMapValues(content -> {
-          ImmutableList.Builder<String> builder = ImmutableList.builder();
-          Matcher matcher = GO_BLOCK_IMPORT_PATTERN.matcher(content);
-          if (matcher.matches()) {
-            builder.add(matcher.group(1));
-          }
-          matcher = GO_SINGLE_IMPORT_PATTERN.matcher(content);
-          if (matcher.matches()) {
-            builder.add(matcher.group(1));
-          }
-          return builder.build();
-        })
-        .flatMapValues(imports -> Splitter.on('\n').split(imports))
-        .filter(tuple -> !tuple._2().isEmpty());
+        .map(tuple -> getImportedPackages(tuple._2()))
+        .flatMap(
+            importPaths -> Splitter.on('\n').omitEmptyStrings().trimResults().split(importPaths)
+                .iterator())
+        .mapToPair(path -> new Tuple2<>(getRepoNameAndPackage(path), 1))
+        .reduceByKey((left, right) -> left + right)
+        .mapToPair(Tuple2::swap)
+        .sortByKey(false)
+        .mapToPair(Tuple2::swap);
+  }
+
+  private static String getImportedPackages(String importContent) {
+    Matcher matcher = GO_BLOCK_IMPORT_PATTERN.matcher(importContent);
+    if (matcher.matches()) {
+      return matcher.group(1);
+    }
+    matcher = GO_SINGLE_IMPORT_PATTERN.matcher(importContent);
+    if (matcher.matches()) {
+      return matcher.group(1);
+    }
+    return "";
+  }
+
+  private static Tuple2<String, String> getRepoNameAndPackage(String importPath) {
+    // Get rid of the alias.
+    if (importPath.contains(" ")) {
+      importPath = importPath.substring(importPath.indexOf(' ') + 1);
+    }
+
+    List<String> items = Splitter.on('/').splitToList(importPath);
+    if (items.size() < 3) {
+      return new Tuple2<>("", importPath);
+    }
+    // The first part is the host site of the repository, such as "github.com".
+    // The second and third parts combined represent the repository names.
+    // The last part is the package name.
+    return new Tuple2<>(items.get(1) + "/" + items.get(2), Iterables.getLast(items));
   }
 }
