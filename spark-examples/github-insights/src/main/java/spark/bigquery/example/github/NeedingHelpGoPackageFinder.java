@@ -36,14 +36,14 @@ public class NeedingHelpGoPackageFinder {
   private static final String APPLICATION_CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS";
 
   private static final String GO_FILES_QUERY =
-      "SELECT *\n"
+      "SELECT id\n"
           + "FROM [bigquery-public-data:github_repos.sample_files]\n"
           + "WHERE RIGHT(path, 3) = '.go'";
 
   private static final String GO_FILES_TABLE = "go_files";
 
   private static final String GO_CONTENTS_QUERY_TEMPLATE =
-      "SELECT *\n"
+      "SELECT sample_repo_name as repo_name, content\n"
           + "FROM [bigquery-public-data:github_repos.sample_contents]\n"
           + "WHERE id IN (SELECT id FROM %s.%s)";
 
@@ -183,7 +183,7 @@ public class NeedingHelpGoPackageFinder {
 
   private static JavaPairRDD<String, String> getContentsByRepoNames(
       Dataset<Row> goContentsDataset) {
-    return goContentsDataset.select("sample_repo_name", "content")
+    return goContentsDataset.select("repo_name", "content")
         .toJavaRDD()
         .mapToPair(row -> new Tuple2<>(row.getString(0), row.getString(1)))
         .filter(tuple -> tuple._2() != null);
