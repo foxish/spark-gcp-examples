@@ -36,18 +36,33 @@ public class NeedingHelpGoPackageFinder {
   private static final String APPLICATION_CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS";
 
   private static final String GO_FILES_QUERY =
-      "SELECT * "
-          + "FROM [bigquery-public-data:github_repos.sample_files] "
+      "SELECT *\n"
+          + "FROM [bigquery-public-data:github_repos.sample_files]\n"
           + "WHERE RIGHT(path, 3) = '.go'";
 
   private static final String GO_FILES_TABLE = "go_files";
 
   private static final String GO_CONTENTS_QUERY_TEMPLATE =
-      "SELECT * "
-          + "FROM [bigquery-public-data:github_repos.sample_contents] "
+      "SELECT *\n"
+          + "FROM [bigquery-public-data:github_repos.sample_contents]\n"
           + "WHERE id IN (SELECT id FROM %s.%s)";
 
-  private static final String GO_CONTENTS_TABLE = "go_contents";
+  private static final String POPULAR_PACKAGES_QUERY_TEMPLATE =
+      "SELECT\n"
+          + "  h.repo_name as repo_name,\n"
+          + "  h.package as package,\n"
+          + "  help_count,\n"
+          + "  import_count,\n"
+          + "  ceil(log(help_count*2)*log(import_count*2)) as popularity\n"
+          + "FROM\n"
+          + "  [ynli-k8s:%s.%s] AS h\n"
+          + "INNER JOIN\n"
+          + "  [ynli-k8s:%s.%s] AS i\n"
+          + "ON\n"
+          + "  h.repo_name = i.repo_name\n"
+          + "  AND h.package = i.package\n"
+          + "ORDER BY\n"
+          + "  popularity DESC";
 
   private static final String GO_PACKAGE_KEYWORD = "package";
 
@@ -57,11 +72,13 @@ public class NeedingHelpGoPackageFinder {
   private static final Pattern GO_BLOCK_IMPORT_PATTERN = Pattern
       .compile("(?s).*import\\s+\\(([^)]*)\\).*");
 
-  private static final String GO_PACKAGES_NEEDING_HELP_TABLE = "go_packages_needing_help";
+  private static final String GO_PACKAGE_HELPS_TABLE = "go_package_helps";
 
   private static final String GO_PACKAGE_IMPORTS_TABLE = "go_package_imports";
 
-  private static final StructType GO_PACKAGES_NEEDING_HELP_TABLE_SCHEMA = new StructType(
+  private static final String POPULAR_GO_PACKAGES_TABLE = "popular_go_packages";
+
+  private static final StructType GO_PACKAGES_HELPS_TABLE_SCHEMA = new StructType(
       new StructField[]{
           new StructField("repo_name", DataTypes.StringType, false, Metadata.empty()),
           new StructField("package", DataTypes.StringType, false, Metadata.empty()),
@@ -124,22 +141,25 @@ public class NeedingHelpGoPackageFinder {
     String goFilesTableId = String
         .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_FILES_TABLE);
     selectAndOutputGoFilesTable(goFilesTableId);
-    String goContentsTableId = String
-        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_CONTENTS_TABLE);
-    selectAndOutputGoContentsTable(goContentsTableId);
 
-    Dataset<Row> goContentsDataset = loadGoContentsTable(goContentsTableId);
-    String goPackagesNeedingHelpTableId = String
-        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_PACKAGES_NEEDING_HELP_TABLE);
-    outputGoPackagesNeedingHelpTable(getNeedHelpPackages(goContentsDataset),
-        goPackagesNeedingHelpTableId);
+    Dataset<Row> goContentsDataset = queryAndCacheGoContents();
+
+    String goPackageHelpsTableId = String
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_PACKAGE_HELPS_TABLE);
+    outputGoPackageHelpsTable(getNeedHelpPackages(goContentsDataset),
+        goPackageHelpsTableId);
+
     String goPackageImportsTableId = String
         .format("%s:%s.%s", this.projectId, this.bigQueryDataset, GO_PACKAGE_IMPORTS_TABLE);
     outputGoPackageImportsTable(getImportedPackages(goContentsDataset), goPackageImportsTableId);
+
+    String popularGoPackagesTableId = String
+        .format("%s:%s.%s", this.projectId, this.bigQueryDataset, POPULAR_GO_PACKAGES_TABLE);
+    queryAndOutputPopularPackagesTable(popularGoPackagesTableId);
   }
 
   /**
-   * This function selects out Go files from github_repos.sample_files and output the result to the
+   * This method selects out Go files from github_repos.sample_files and output the result to the
    * given BigQuery table.
    */
   private void selectAndOutputGoFilesTable(String outputTableId) {
@@ -150,22 +170,15 @@ public class NeedingHelpGoPackageFinder {
   }
 
   /**
-   * This function selects out Go source file contents from github_repos.sample_contents for files
+   * This method selects out Go source file contents from github_repos.sample_contents for files
    * in the table written by {@link #selectAndOutputGoFilesTable(String)} and output the result to
    * the given BigQuery table.
    */
-  private void selectAndOutputGoContentsTable(String outputTableId) {
+  private Dataset<Row> queryAndCacheGoContents() {
     Dataset<Row> dataset = this.bigQuerySQLContext
         .bigQuerySelect(
             String.format(GO_CONTENTS_QUERY_TEMPLATE, this.bigQueryDataset, GO_FILES_TABLE));
-    BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
-    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
-        WriteDisposition.WRITE_EMPTY());
-  }
-
-  private Dataset<Row> loadGoContentsTable(String goContentsTableId) {
-    return this.bigQuerySQLContext.bigQueryTable(goContentsTableId)
-        .persist(StorageLevel.MEMORY_AND_DISK());
+    return dataset.persist(StorageLevel.MEMORY_AND_DISK());
   }
 
   private static JavaPairRDD<String, String> getContentsByRepoNames(
@@ -177,22 +190,22 @@ public class NeedingHelpGoPackageFinder {
   }
 
   /**
-   * This function outputs the result of the number of places helps are needed for each
+   * This method outputs the result of the number of places helps are needed for each
    * repository/package combination to the given BigQuery table.
    */
-  private void outputGoPackagesNeedingHelpTable(
+  private void outputGoPackageHelpsTable(
       JavaPairRDD<Tuple2<String, String>, Integer> packagesNeedingHelp, String outputTableId) {
     Dataset<Row> dataset = this.sqlContext.createDataFrame(packagesNeedingHelp
             .map(tuple -> RowFactory.create(tuple._1()._1(), tuple._1()._2(), tuple._2()))
             .rdd(),
-        GO_PACKAGES_NEEDING_HELP_TABLE_SCHEMA);
+        GO_PACKAGES_HELPS_TABLE_SCHEMA);
     BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
     bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
         WriteDisposition.WRITE_EMPTY());
   }
 
   /**
-   * This function outputs the result of the number of times a package is imported in other
+   * This method outputs the result of the number of times a package is imported in other
    * repositories to the given BigQuery table.
    */
   private void outputGoPackageImportsTable(
@@ -203,12 +216,28 @@ public class NeedingHelpGoPackageFinder {
             .rdd(),
         GO_PACKAGE_IMPORTS_TABLE_SCHEMA);
     BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
-    bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
-        WriteDisposition.WRITE_EMPTY());
+    bigQueryDataFrame
+        .saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
+            WriteDisposition.WRITE_EMPTY());
   }
 
   /**
-   * This function takes the sample contents dataset and produces a JavaPairRDD with keys in the
+   * This method outputs the final result of popular Go packages that need help sorted by a
+   * popularity factor that is calculated as {@code log(num_helps_needed)*log(num_imports)}.
+   */
+  private void queryAndOutputPopularPackagesTable(String outputTableId) {
+    Dataset<Row> dataset = this.bigQuerySQLContext
+        .bigQuerySelect(String
+            .format(POPULAR_PACKAGES_QUERY_TEMPLATE, this.bigQueryDataset, GO_PACKAGE_HELPS_TABLE,
+                this.bigQueryDataset, GO_PACKAGE_IMPORTS_TABLE));
+    BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
+    bigQueryDataFrame
+        .saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
+            WriteDisposition.WRITE_EMPTY());
+  }
+
+  /**
+   * This method takes the sample contents dataset and produces a JavaPairRDD with keys in the
    * form of (sample_repo_name, package) and values being a count a particular repo_name/package
    * combination needs help. The result is sorted in descending order by the counts.
    */
@@ -227,7 +256,7 @@ public class NeedingHelpGoPackageFinder {
   }
 
   /**
-   * This function takes the sample contents dataset and produces a JavaPairRDD with keys in the
+   * This method takes the sample contents dataset and produces a JavaPairRDD with keys in the
    * form of (sample_repo_name, package) and values being a count a particular repo_name/package
    * combination is imported by other projects. The result is sorted in descending order by the
    * counts.
@@ -259,6 +288,10 @@ public class NeedingHelpGoPackageFinder {
     return "";
   }
 
+  /**
+   * This method converts a Go import path into a combination of a repository name and a package
+   * name on a best-effort basis with some special handling for popular Go repositories.
+   */
   private static Tuple2<String, String> getRepoNameAndPackage(String importPath) {
     // Get rid of the alias.
     if (importPath.contains(" ")) {
