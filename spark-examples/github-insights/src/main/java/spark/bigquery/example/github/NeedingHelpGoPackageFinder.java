@@ -264,14 +264,33 @@ public class NeedingHelpGoPackageFinder {
     if (importPath.contains(" ")) {
       importPath = importPath.substring(importPath.indexOf(' ') + 1);
     }
-
     List<String> items = Splitter.on('/').splitToList(importPath);
-    if (items.size() < 3) {
-      return new Tuple2<>("", importPath);
+
+    // Standard top-level Go packages.
+    if (items.size() < 2) {
+      return new Tuple2<>("golang/go", importPath);
     }
-    // The first part is the host site of the repository, such as "github.com".
-    // The second and third parts combined represent the repository names.
-    // The last part is the package name.
+
+    // Special handling for import paths starting with "k8s.io".
+    if (items.get(0).equalsIgnoreCase("k8s.io")) {
+      return new Tuple2<>("kubernetes/" + items.get(1), Iterables.getLast(items));
+    }
+
+    if (items.size() == 2) {
+      return new Tuple2<>(importPath, Iterables.getLast(items));
+    }
+
+    // Special handling for import paths starting with "golang.org/x".
+    if (importPath.startsWith("golang.org/x")) {
+      return new Tuple2<>("golang/" + items.get(2), Iterables.getLast(items));
+    }
+
+    // Special handling for import paths starting with "github.com".
+    if (items.get(0).equalsIgnoreCase("github.com")) {
+      return new Tuple2<>(items.get(1) + "/" + items.get(2), Iterables.getLast(items));
+    }
+
+    // All other cases.
     return new Tuple2<>(items.get(1) + "/" + items.get(2), Iterables.getLast(items));
   }
 }
