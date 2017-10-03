@@ -33,8 +33,6 @@ import scala.Tuple2;
  */
 public class NeedingHelpGoPackageFinder {
 
-  private static final String APPLICATION_CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS";
-
   private static final String GO_FILES_QUERY =
       "SELECT id\n"
           + "FROM [bigquery-public-data:github_repos.sample_files]\n"
@@ -111,15 +109,10 @@ public class NeedingHelpGoPackageFinder {
     this.projectId = projectId;
     this.bigQueryDataset = bigQueryDataset;
 
-    String serviceAccountJsonKeyFilePath = System.getenv(APPLICATION_CREDENTIALS_ENV);
-    Preconditions.checkArgument(!Strings.isNullOrEmpty(serviceAccountJsonKeyFilePath),
-        APPLICATION_CREDENTIALS_ENV + " must be set");
-
     this.sqlContext = SQLContext.getOrCreate(SparkContext.getOrCreate());
     this.bigQuerySQLContext = new BigQuerySQLContext(this.sqlContext);
     this.bigQuerySQLContext.setBigQueryProjectId(projectId);
     this.bigQuerySQLContext.setBigQueryGcsBucket(gcsBucket);
-    this.bigQuerySQLContext.setGcpJsonKeyFile(serviceAccountJsonKeyFilePath);
   }
 
   public static void main(String[] args) {
