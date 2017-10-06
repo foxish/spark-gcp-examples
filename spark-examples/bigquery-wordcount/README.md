@@ -94,4 +94,8 @@ Both connectors also require that the user specifies a GCP project ID for billin
 
 [Spark on Kubernetes](https://github.com/apache-spark-on-k8s/spark) jobs create a driver Pod and one or more executor Pods named after the Spark application name specified by `spark.app.name`, with a suffix `-driver` for the driver Pod and `-exec-<executor ID>` for the executor Pods. The logs of a driver or executor Pod can be checked using `kubectl logs <pod name>`.
 
-## Trouble Shooting
+## Known Issues
+
+### Guava Version
+
+The Saprk on Kubernetes distribution (e.g., of the latest release) comes with `guava-14.0.1.jar` under `jars`, which is older than the version used and needed by the GCS/BigQiery connectors. To fix this issue, replace `guava-14.0.1.jar` with one of a newer version, e.g., `19.0`. 

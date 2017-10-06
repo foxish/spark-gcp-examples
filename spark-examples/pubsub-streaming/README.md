@@ -101,5 +101,9 @@ Pods named after the Spark application name specified by `spark.app.name`, with 
 Pod and `-exec-<executor ID>` for the executor Pods. The logs of a driver or executor Pod can be checked using
 `kubectl logs <pod name>`.
 
-## Trouble Shooting
+## Known Issues
+
+### Guava Version
+
+The Saprk on Kubernetes distribution (e.g., of the latest release) comes with `guava-14.0.1.jar` under `jars`, which is older than the version used and needed by the GCS connector. To fix this issue, replace `guava-14.0.1.jar` with one of a newer version, e.g., `19.0`. 
 
